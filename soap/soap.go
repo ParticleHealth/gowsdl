@@ -24,6 +24,7 @@ type SOAPResponseEnvelopeInterface interface {
 type SoapResponseBodyInterface interface {
 	ErrorFromFault() error
 	SetContent(interface{})
+	HasError() bool
 }
 
 type SOAPEncoder interface {
@@ -177,6 +178,10 @@ func (b *SOAPBodyResponse) ErrorFromFault() error {
 
 func (b *SOAPBodyResponse) SetContent(content interface{}) {
 	b.Content = content
+}
+
+func (b *SOAPBodyResponse) HasError() bool {
+	return b.faultOccurred
 }
 
 type DetailContainer struct {
@@ -530,6 +535,8 @@ func (s *Client) call(ctx context.Context, soapAction string, requestEnvelope, r
 	}
 	defer res.Body.Close()
 
+	//printRequest("Response", res.Body, res.Header)
+
 	if res.StatusCode >= 400 && res.StatusCode != 500 {
 		body, _ := io.ReadAll(res.Body)
 		return &HTTPError{
@@ -591,7 +598,6 @@ func (s *Client) call(ctx context.Context, soapAction string, requestEnvelope, r
 	} else {
 		dec = xml.NewDecoder(body)
 	}
-
 	if err := dec.Decode(responseEnvelope); err != nil {
 		// the response doesn't contain a Fault/SOAPBody, so we return the original body
 		if res.StatusCode == 500 {

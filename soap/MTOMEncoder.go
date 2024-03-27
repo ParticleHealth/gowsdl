@@ -233,6 +233,7 @@ func newMtomDecoder(r io.Reader, boundary string) *mtomDecoder {
 
 func (d *mtomDecoder) Decode(v interface{}) error {
 	packages := make(map[string]*Binary, 0)
+
 	for {
 		p, err := d.reader.NextPart()
 		if err != nil {
@@ -264,8 +265,11 @@ func (d *mtomDecoder) Decode(v interface{}) error {
 			}
 		}
 	}
+	if v, ok := v.(SOAPResponseEnvelopeInterface); ok && v.GetBody() != nil && v.GetBody().HasError() {
+		return fmt.Errorf("SOAP Fault")
+	}
 
-	// Get binary fields after reading the structure, so I have all fields mapped
+	// Get binary fields after reading the structure, so Ihave all fields mapped
 	fields := make([]reflect.Value, 0)
 	getBinaryFields(v, &fields)
 

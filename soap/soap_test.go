@@ -44,6 +44,10 @@ func (b *TestResponseBody) SetContent(content interface{}) {
 	b.PingResponse = content.(*PingResponse)
 }
 
+func (b *TestResponseBody) HasError() bool {
+	return false
+}
+
 type PingReply struct {
 	// XMLName xml.Name `xml:"http://example.com/service.xsd PingReply"`
 
@@ -74,7 +78,7 @@ type TestResponseBody struct {
 }
 
 type TestSoapResponse struct {
-	XMLName     xml.Name `xml:"http://schemas.xmlsoap.org/soap/envelope/ Envelope"`
+	XMLName     xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Envelope"`
 	Header      *SOAPHeaderResponse
 	Body        SoapResponseBodyInterface `xml:"Body"`
 	Attachments []MIMEMultipartAttachment `xml:"attachments,omitempty"`
@@ -102,6 +106,10 @@ func (s *TestSoapResponse) SetXMLName(xmlName xml.Name) {
 
 func (s *TestSoapResponse) GetAttachments() []MIMEMultipartAttachment {
 	return s.Attachments
+}
+
+func (s *TestSoapResponse) HasError() bool {
+	return false
 }
 
 func TestClient_Call(t *testing.T) {
@@ -144,7 +152,7 @@ func TestClient_CallEnvelope(t *testing.T) {
 		err := xml.NewDecoder(r.Body).Decode(&soapRequest)
 		assert.NoError(t, err)
 		rsp := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-		<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+		<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
 			<soap:Body>
 				<PingResponse xmlns="http://example.com/service.xsd">
 					<PingResult>
@@ -152,7 +160,7 @@ func TestClient_CallEnvelope(t *testing.T) {
 					</PingResult>
 				</PingResponse>
 			</soap:Body>
-		</soap:Envelope>`, soapRequest.Body.PingRequest.Request.Message)
+		</SOAP-ENV:Envelope>`, soapRequest.Body.PingRequest.Request.Message)
 		w.Write([]byte(rsp))
 	}))
 	defer ts.Close()
@@ -178,6 +186,47 @@ func TestClient_CallEnvelope(t *testing.T) {
 	if reply.PingResult.Message != wantedMsg {
 		t.Errorf("got msg %s wanted %s", reply.PingResult.Message, wantedMsg)
 	}
+}
+
+func TestClient_CallEnvelope2(t *testing.T) {
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var soapRequest TestSoapRequest
+		err := xml.NewDecoder(r.Body).Decode(&soapRequest)
+		assert.NoError(t, err)
+		rsp := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" ?>
+		<SOAP-ENV:Envelope xmlns:SOAP-ENV='http://www.w3.org/2003/05/soap-envelope' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xmlns:s='http://www.w3.org/2001/XMLSchema' xmlns:wsa='http://www.w3.org/2005/08/addressing'>
+		  <SOAP-ENV:Header>
+		<wsa:Action SOAP-ENV:mustUnderstand="true">urn:ihe:iti:2007:RegistryStoredQueryResponse</wsa:Action><wsa:MessageID>urn:uuid:4ED96998-DFCE-11EE-878F-0050568E26FC</wsa:MessageID><wsa:RelatesTo>urn:uuid:ef7adf65-3f63-4dab-9362-43b59eaf4df1</wsa:RelatesTo><wsa:To>http://www.w3.org/2005/08/addressing/anonymous</wsa:To>  </SOAP-ENV:Header>
+		  <SOAP-ENV:Body><query:AdhocQueryResponse xmlns="urn:oasis:names:tc:ebxml-regrep:xsd:query:3.0" xmlns:query="urn:oasis:names:tc:ebxml-regrep:xsd:query:3.0" status="urn:oasis:names:tc:ebxml-regrep:ResponseStatusType:Success">
+		<rim:RegistryObjectList xmlns="urn:oasis:names:tc:ebxml-regrep:xsd:rim:3.0" xmlns:rim="urn:oasis:names:tc:ebxml-regrep:xsd:rim:3.0">
+		<Message>Pong %s</Message>
+		</rim:RegistryObjectList></query:AdhocQueryResponse></SOAP-ENV:Body>
+		</SOAP-ENV:Envelope>`, soapRequest.Body.PingRequest.Request.Message)
+		w.Write([]byte(rsp))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	req := &Ping{Request: &PingRequest{Message: "Bill"}}
+	var env TestSoapRequest
+	env.Body.PingRequest = *req
+
+	reply := &XMLQueryResponse{}
+	responeBody := XMLQueryResponseBody{}
+	responeBody.SetContent(reply)
+
+	respEnv := &XMLResponseEnvelope{
+		Body: &responeBody,
+	}
+
+	if err := client.CallWithEnvelope(context.Background(), "GetData", env, respEnv, nil, nil); err != nil {
+		t.Fatalf("couln't call service: %v", err)
+	}
+
+	wantedMsg := "Pong Bill"
+	assert.Equal(t, wantedMsg, reply.RegistryObjectList.Message[0])
+
 }
 
 func TestClient_Send_Correct_Headers(t *testing.T) {
@@ -279,6 +328,120 @@ func TestClient_Attachments_WithAttachmentResponse(t *testing.T) {
 	assert.Equal(t, retAttachments[1], secondAtt)
 }
 
+func TestClient_MTOMRetrieveDocument(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Date", "Tue, 12 Mar 2024 21:12:43 GMT")
+		w.Header().Add("Cache-Control", "no-cache")
+		w.Header().Add("Expires", "Thu, 29 Oct 1998 17:04:19 GMT")
+		w.Header().Add("Mime-Version", "1.0")
+		w.Header().Add("Server", "Apache/2.4.34 (Red Hat) OpenSSL/1.0.2k-fips mod_auth_kerb/5.4")
+		w.Header().Add("Pragma", "no-cache")
+		w.Header().Add("Content-Type", `multipart/related; type="application/xop+xml"; boundary="--boundary4190.2352941176470595731.411764705882353--"; start="<0.3E41B5F6.E0B7.11EE.88F1.0050568E26FC>"; start-info="application/soap+xml"; charset=utf-8`)
+		w.Write([]byte(`
+----boundary4190.2352941176470595731.411764705882353--
+Content-Type: application/xop+xml; type="application/soap+xml"; charset="UTF-8"
+Content-Transfer-Encoding: 8bit
+Content-Id: <0.3E41B5F6.E0B7.11EE.88F1.0050568E26FC>
+
+<soap:Envelope xmlns:soap='http://www.w3.org/2003/05/soap-envelope' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xmlns:s='http://www.w3.org/2001/XMLSchema' xmlns:wsa='http://www.w3.org/2005/08/addressing'>
+<soap:Header>
+<wsa:MessageID>urn:uuid:D527343E-E0B5-11EE-88F1-0050568E26FC</wsa:MessageID>
+</soap:Header>
+<soap:Body>
+<xdsb:RetrieveDocumentSetResponse xmlns="urn:ihe:iti:xds-b:2007" xmlns:xdsb="urn:ihe:iti:xds-b:2007">
+<rs:RegistryResponse xmlns="urn:oasis:names:tc:ebxml-regrep:xsd:rs:3.0" xmlns:rs="urn:oasis:names:tc:ebxml-regrep:xsd:rs:3.0" status="urn:oasis:names:tc:ebxml-regrep:ResponseStatusType:Success"/>
+<xdsb:DocumentResponse>
+<xdsb:mimeType>text/xml</xdsb:mimeType>
+<xdsb:Document>
+<xop:Include xmlns="http://www.w3.org/2004/08/xop/include" xmlns:xop="http://www.w3.org/2004/08/xop/include" href="cid:urn:uuid:c12e89f4-e0b6-11ee-ad60-0050568e26fc"/>
+</xdsb:Document>
+</xdsb:DocumentResponse>
+</xdsb:RetrieveDocumentSetResponse>
+</soap:Body>
+</soap:Envelope>
+----boundary4190.2352941176470595731.411764705882353--
+Content-Id: <urn:uuid:c12e89f4-e0b6-11ee-ad60-0050568e26fc>
+Content-Transfer-Encoding: binary
+CONTENT-TYPE: text/xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<CCDA><Patient></Patient></CCDA>
+
+----boundary4190.2352941176470595731.411764705882353----`))
+
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, WithMTOM())
+	//req := &PingRequest{Attachment: NewBinary([]byte("Attached data")).SetContentType("text/plain")}
+
+	req := &Ping{Request: &PingRequest{Message: "Bill", Attachment: NewBinary([]byte("*****Attached data****")).SetContentType("text/plain")}}
+	var env TestSoapRequest
+	env.Body.PingRequest = *req
+
+	reply := &RetrieveDocumentSetResponse{}
+	responeBody := XMLDocRetrieveBody{}
+	responeBody.SetContent(reply)
+
+	respEnv := &XMLResponseEnvelope{
+		Body: &responeBody,
+	}
+
+	if err := client.CallWithEnvelope(context.Background(), "GetData", env, respEnv, nil, nil); err != nil {
+		t.Fatalf("couln't call service: %v", err)
+	}
+
+	assert.Equal(t, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CCDA><Patient></Patient></CCDA>\n", string(reply.DocumentResponse.Document.Bytes()))
+
+}
+
+func TestClient_MTOM_InvalidResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Date", "Tue, 12 Mar 2024 21:12:43 GMT")
+		w.Header().Add("Cache-Control", "no-cache")
+		w.Header().Add("Expires", "Thu, 29 Oct 1998 17:04:19 GMT")
+		w.Header().Add("Mime-Version", "1.0")
+		w.Header().Add("Server", "Apache/2.4.34 (Red Hat) OpenSSL/1.0.2k-fips mod_auth_kerb/5.4")
+		w.Header().Add("Pragma", "no-cache")
+		w.Header().Add("Content-Type", `multipart/related; type="application/xop+xml"; boundary=--boundary1087.3529411764705881155.058823529411765--; start="<0.138D4DA0.E13B.11EE.89A2.0050568E26FC>"; start-info="application/soap+xml"`)
+		w.Write([]byte(`
+----boundary1087.3529411764705881155.058823529411765--
+Content-Type: application/xop+xml; type="application/soap+xml"; charset="UTF-8"
+Content-Transfer-Encoding: 8bit
+Content-Id: <0.138D4DA0.E13B.11EE.89A2.0050568E26FC>
+
+<?xml version="1.0" encoding="UTF-8" ?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV='http://www.w3.org/2003/05/soap-envelope' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xmlns:s='http://www.w3.org/2001/XMLSchema' xmlns:wsa='http://www.w3.org/2005/08/addressing'>
+<SOAP-ENV:Header><wsa:Action SOAP-ENV:mustUnderstand="true">urn:ihe:iti:2007:RetrieveDocumentSetResponse</wsa:Action><wsa:MessageID>urn:uuid:0C62ACCC-E13C-11EE-89A1-0050568E26FC</wsa:MessageID><wsa:RelatesTo>urn:uuid:urn:uuid:2.25.161567121395904985885456871134572859587</wsa:RelatesTo><wsa:To>http://www.w3.org/2005/08/addressing/anonymous</wsa:To></SOAP-ENV:Header>
+<SOAP-ENV:Body><xdsb:RetrieveDocumentSetResponse xmlns="urn:ihe:iti:xds-b:2007" xmlns:xdsb="urn:ihe:iti:xds-b:2007"><rs:RegistryResponse xmlns="urn:oasis:names:tc:ebxml-regrep:xsd:rs:3.0" xmlns:rs="urn:oasis:names:tc:ebxml-regrep:xsd:rs:3.0" status="urn:oasis:names:tc:ebxml-regrep:ResponseStatusType:Failure"/></xdsb:RetrieveDocumentSetResponse></SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+----boundary1087.3529411764705881155.058823529411765--
+`))
+
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, WithMTOM())
+	//req := &PingRequest{Attachment: NewBinary([]byte("Attached data")).SetContentType("text/plain")}
+
+	req := &Ping{Request: &PingRequest{Message: "Bill", Attachment: NewBinary([]byte("*****Attached data****")).SetContentType("text/plain")}}
+	var env TestSoapRequest
+	env.Body.PingRequest = *req
+
+	reply := &RetrieveDocumentSetResponse{}
+	responeBody := XMLDocRetrieveBody{}
+	responeBody.SetContent(reply)
+
+	respEnv := &XMLResponseEnvelope{
+		Body: &responeBody,
+	}
+
+	err := client.CallWithEnvelope(context.Background(), "GetData", env, respEnv, nil, nil)
+
+	assert.EqualError(t, err, "SOAP Fault")
+
+}
+
 func TestClient_MTOM(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for k, v := range r.Header {
@@ -286,11 +449,12 @@ func TestClient_MTOM(t *testing.T) {
 		}
 		bodyBuf, _ := io.ReadAll(r.Body)
 		w.Write(bodyBuf)
+
 	}))
 	defer ts.Close()
 
 	client := NewClient(ts.URL, WithMTOM())
-	req := &PingRequest{Attachment: NewBinary([]byte("Attached data")).SetContentType("text/plain")}
+	req := &PingRequest{Attachment: NewBinary([]byte("*****Attached data****")).SetContentType("text/plain")}
 	reply := &PingRequest{}
 	if err := client.Call("GetData", req, reply); err != nil {
 		t.Fatalf("couln't call service: %v", err)
